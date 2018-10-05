@@ -1,0 +1,11 @@
+[package]
+name = "concerto"
+version = "0.1.0"
+authors = ["CrLF0710 <crlf0710@gmail.com>"]
+
+[dependencies]
+slab = "0.4"
+smallvec = "0.6"
+vec-drain-where = "1"
+fixedbitset = "0.1"
+log = "0.4"
