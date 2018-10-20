@@ -329,6 +329,31 @@ impl<'a, C: ActionConfiguration> ActionRecipeBuilder<'a, C> {
         }
         self
     }
+    pub fn add_unordered_multiple_key_down_input(mut self, keys: &[C::KeyKind]) -> Self {
+        let mut items = None;
+        self.sequence_builder.add_compound_sequence(
+            ActionRecipeSequenceKind::Unordered,
+            |builder| {
+                items = Some(
+                    keys.iter()
+                        .map(|key| builder.add_primitive_start_key_down_input(key.clone()))
+                        .collect::<Vec<_>>(),
+                );
+            },
+        );
+
+        if let Some(items) = items {
+            self.sequence_builder.add_compound_sequence(
+                ActionRecipeSequenceKind::Sequential,
+                |builder| {
+                    items.into_iter().for_each(|item| {
+                        builder.add_primitive_eliminate_item(item);
+                    });
+                },
+            );
+        }
+        self
+    }
     pub fn add_unordered_multiple_key_up_input(mut self, keys: &[C::KeyKind]) -> Self {
         let mut items = None;
         self.sequence_builder.add_compound_sequence(
