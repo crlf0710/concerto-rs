@@ -2,6 +2,7 @@ use context::ActionEnvironmentTrackingState;
 use context::ActionRecipeItemIdx;
 use context::ActionRecipeItemStore;
 use fixedbitset::FixedBitSet;
+use recipe::ActionNestRecipeCommand;
 use recipe::{ActionCondition, ActionInput};
 use recipe::{ActionRecipe, ActionRecipeItem};
 use smallvec::SmallVec;
@@ -21,53 +22,129 @@ pub(crate) struct ActionExecutionCtx<C: ActionConfiguration> {
     stored_contracts: ActionExecutionContractStore<C>,
 }
 
+enum ActionExecutionContract<C: ActionConfiguration> {
+    Input(ActionInput<C>),
+    Condition(ActionCondition<C>),
+    Effect(C::Command),
+    NestRecipe(usize),
+    NestRecipeDisable(usize),
+}
+
 struct ActionExecutionContractStore<C: ActionConfiguration> {
-    inputs: BTreeMap<ActionRecipeItemIdx, ActionInput<C>>,
-    conditions: BTreeMap<ActionRecipeItemIdx, ActionCondition<C>>,
-    effects: BTreeMap<ActionRecipeItemIdx, C::Command>,
+    contracts: BTreeMap<ActionRecipeItemIdx, ActionExecutionContract<C>>,
 }
 
 impl<C: ActionConfiguration> ActionExecutionContractStore<C> {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         ActionExecutionContractStore {
-            inputs: BTreeMap::new(),
-            conditions: BTreeMap::new(),
-            effects: BTreeMap::new(),
+            contracts: BTreeMap::new(),
         }
     }
 
-    fn add_input(&mut self, item: ActionRecipeItemIdx, input_contract: ActionInput<C>) {
-        self.inputs.insert(item, input_contract);
+    pub(crate) fn add_input(&mut self, item: ActionRecipeItemIdx, input_contract: ActionInput<C>) {
+        self.contracts
+            .insert(item, ActionExecutionContract::Input(input_contract));
     }
 
-    fn add_condition(&mut self, item: ActionRecipeItemIdx, condition_contract: ActionCondition<C>) {
-        self.conditions.insert(item, condition_contract);
+    pub(crate) fn add_condition(
+        &mut self,
+        item: ActionRecipeItemIdx,
+        condition_contract: ActionCondition<C>,
+    ) {
+        self.contracts
+            .insert(item, ActionExecutionContract::Condition(condition_contract));
     }
 
-    fn add_effect(&mut self, item: ActionRecipeItemIdx, effect_end_contract: C::Command) {
-        self.effects.insert(item, effect_end_contract);
+    pub(crate) fn add_effect(
+        &mut self,
+        item: ActionRecipeItemIdx,
+        effect_end_contract: C::Command,
+    ) {
+        self.contracts
+            .insert(item, ActionExecutionContract::Effect(effect_end_contract));
     }
 
-    fn eliminate(&mut self, item: &ActionRecipeItemIdx, command_list: &mut Vec<C::Command>) {
-        let _ = self.inputs.remove(item);
-        let _ = self.conditions.remove(item);
-        let effect_end = self.effects.remove(item);
-        if let Some(effect_end) = effect_end {
-            command_list.push(effect_end);
+    pub(crate) fn add_nest_recipe(&mut self, item: ActionRecipeItemIdx, nest_recipe: usize) {
+        self.contracts
+            .insert(item, ActionExecutionContract::NestRecipe(nest_recipe));
+    }
+
+    pub(crate) fn add_nest_recipe_disabled(
+        &mut self,
+        item: ActionRecipeItemIdx,
+        nest_recipe: usize,
+    ) {
+        self.contracts.insert(
+            item,
+            ActionExecutionContract::NestRecipeDisable(nest_recipe),
+        );
+    }
+
+    fn internal_eliminate_contract(
+        &mut self,
+        recipe_id: usize,
+        contract: ActionExecutionContract<C>,
+        command_list: &mut Vec<C::Command>,
+        nest_recipe_command_list: &mut Vec<ActionNestRecipeCommand>,
+    ) -> bool {
+        match contract {
+            ActionExecutionContract::Effect(effect_end) => {
+                command_list.push(effect_end);
+                true
+            }
+            ActionExecutionContract::NestRecipe(id) => {
+                nest_recipe_command_list.push(ActionNestRecipeCommand::Abort(recipe_id, id));
+                false
+            }
+            ActionExecutionContract::NestRecipeDisable(id) => {
+                nest_recipe_command_list.push(ActionNestRecipeCommand::Enable(recipe_id, id));
+                false
+            }
+            _ => false,
         }
     }
 
-    fn clear_effects(&mut self, command_list: &mut Vec<C::Command>) -> bool {
-        if self.effects.is_empty() {
-            return false;
+    pub(crate) fn eliminate(
+        &mut self,
+        recipe_id: usize,
+        item: &ActionRecipeItemIdx,
+        command_list: &mut Vec<C::Command>,
+        nest_recipe_command_list: &mut Vec<ActionNestRecipeCommand>,
+    ) -> bool {
+        if let Some(contract) = self.contracts.remove(item) {
+            self.internal_eliminate_contract(
+                recipe_id,
+                contract,
+                command_list,
+                nest_recipe_command_list,
+            )
+        } else {
+            false
         }
+    }
+
+    pub(crate) fn eliminate_all(
+        &mut self,
+        recipe_id: usize,
+        command_list: &mut Vec<C::Command>,
+        nest_recipe_command_list: &mut Vec<ActionNestRecipeCommand>,
+    ) -> bool {
         use std::mem::swap;
 
-        let mut effects = BTreeMap::new();
-        swap(&mut self.effects, &mut effects);
-
-        command_list.extend(effects.into_iter().map(|(k,v)| v));
-        true
+        let mut contracts = BTreeMap::new();
+        swap(&mut self.contracts, &mut contracts);
+        let mut new_command = false;
+        for (k, contract) in contracts {
+            if self.internal_eliminate_contract(
+                recipe_id,
+                contract,
+                command_list,
+                nest_recipe_command_list,
+            ) {
+                new_command = true;
+            }
+        }
+        new_command
     }
 }
 
@@ -80,9 +157,12 @@ impl<'a, C: ActionConfiguration> ActionRecipeExecutionInfo<'a, C> {
         ActionRecipeExecutionInfo { stored_contracts }
     }
     pub fn cursor_coordinate(&self) -> Option<&C::Target> {
-        for (idx, expected_input) in self.stored_contracts.inputs.iter() {
-            match expected_input {
-                ActionInput::CursorCoordinate(target) => return Some(target),
+        for (idx, contract) in self.stored_contracts.contracts.iter() {
+            match contract {
+                ActionExecutionContract::Input(expected_input) => match expected_input {
+                    ActionInput::CursorCoordinate(target) => return Some(target),
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -117,15 +197,20 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
         input: &ActionInput<C>,
         stored_contracts: &ActionExecutionContractStore<C>,
     ) -> bool {
-        for (item_idx, expected_input) in stored_contracts.inputs.iter() {
-            match Self::check_input_match_input(expected_input, input) {
-                ExecutionContextResult::Abort => return true,
-                _ => {}
-            }
-        }
-        for (item_idx, condition) in stored_contracts.conditions.iter() {
-            match Self::check_input_match_condition(condition, input) {
-                ExecutionContextResult::Abort => return true,
+        for (idx, contract) in stored_contracts.contracts.iter() {
+            match contract {
+                ActionExecutionContract::Input(expected_input) => {
+                    match Self::check_input_match_input(expected_input, input) {
+                        ExecutionContextResult::Abort => return true,
+                        _ => {}
+                    }
+                }
+                ActionExecutionContract::Condition(condition) => {
+                    match Self::check_input_match_condition(condition, input) {
+                        ExecutionContextResult::Abort => return true,
+                        _ => {}
+                    }
+                }
                 _ => {}
             }
         }
@@ -216,14 +301,14 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
                 } else {
                     ExecutionContextResult::Ignore
                 }
-            },
+            }
             (ActionCondition::KeyPressed(b_k, true), ActionInput::KeyUp(k)) => {
                 if b_k == k {
                     ExecutionContextResult::Abort
                 } else {
                     ExecutionContextResult::Ignore
                 }
-            },
+            }
             _ => ExecutionContextResult::Ignore,
         }
     }
@@ -280,15 +365,22 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
     }
 
     fn put_noninteractive_item_into_effect(
+        recipe_id: usize,
         recipe_item_idx: ActionRecipeItemIdx,
         recipe_item: &ActionRecipeItem<C>,
         command_list: &mut Vec<C::Command>,
+        nest_recipe_command_list: &mut Vec<ActionNestRecipeCommand>,
         stored_contracts: &mut ActionExecutionContractStore<C>,
     ) {
         debug_assert!(recipe_item.is_noninteractive());
         match recipe_item {
             ActionRecipeItem::EliminateItem(item_idx) => {
-                stored_contracts.eliminate(item_idx, command_list);
+                stored_contracts.eliminate(
+                    recipe_id,
+                    item_idx,
+                    command_list,
+                    nest_recipe_command_list,
+                );
             }
             ActionRecipeItem::StartEffect(effect) => {
                 let cmd = effect.effect_start().clone();
@@ -302,6 +394,14 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
                 };
                 command_list.push(effect_start);
                 stored_contracts.add_effect(recipe_item_idx, effect_end);
+            }
+            ActionRecipeItem::StartNestRecipe(idx) => {
+                nest_recipe_command_list.push(ActionNestRecipeCommand::Enable(recipe_id, *idx));
+                stored_contracts.add_nest_recipe(recipe_item_idx, *idx);
+            }
+            ActionRecipeItem::DisableNestRecipe(idx) => {
+                nest_recipe_command_list.push(ActionNestRecipeCommand::Disable(recipe_id, *idx));
+                stored_contracts.add_nest_recipe_disabled(recipe_item_idx, *idx);
             }
             ActionRecipeItem::DoCommand(cmd) => {
                 let cmd = cmd.command().clone();
@@ -454,6 +554,7 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
         &mut self,
         recipe_items: &ActionRecipeItemStore<C>,
         command_list: &mut Vec<C::Command>,
+        nest_recipe_command_list: &mut Vec<ActionNestRecipeCommand>,
         env: &ActionEnvironmentTrackingState<C>,
     ) -> ExecutionContextResult {
         'frame_loop: while !self.backtrace.is_empty() {
@@ -494,9 +595,11 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
                             } else if seq_next_item.is_noninteractive() {
                                 debug!(target: "concerto", "process_input_2: recipe_id = {}, seq = {:?}, next = {}, non-interactive", self.recipe_idx, last_frame.0, next);
                                 Self::put_noninteractive_item_into_effect(
+                                    self.recipe_idx,
                                     seq_next_item_idx,
                                     seq_next_item,
                                     command_list,
+                                    nest_recipe_command_list,
                                     &mut self.stored_contracts,
                                 );
                                 *state_pos = Some(next);
@@ -557,6 +660,7 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
         recipe_items: &ActionRecipeItemStore<C>,
         recipe: &ActionRecipe<C>,
         command_list: &mut Vec<C::Command>,
+        nest_recipe_command_list: &mut Vec<ActionNestRecipeCommand>,
         env: &ActionEnvironmentTrackingState<C>,
     ) -> ExecutionContextResult {
         match self.process_input_1(input, recipe_items, recipe) {
@@ -571,12 +675,16 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
                 return ExecutionContextResult::Abort;
             }
         }
-
-        return self.process_input_2(recipe_items, command_list, env);
+        return self.process_input_2(recipe_items, command_list, nest_recipe_command_list, env);
     }
 
-    pub(crate) fn clear_effects(&mut self, command_list: &mut Vec<C::Command>) -> bool {
-        self.stored_contracts.clear_effects(command_list)
+    pub(crate) fn clean_up(
+        &mut self,
+        command_list: &mut Vec<C::Command>,
+        nest_recipe_command_list: &mut Vec<ActionNestRecipeCommand>,
+    ) -> bool {
+        self.stored_contracts
+            .eliminate_all(self.recipe_idx, command_list, nest_recipe_command_list)
     }
 
     pub(crate) fn start_execution_with_input(
@@ -585,10 +693,17 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
         recipe: &ActionRecipe<C>,
         recipe_idx: usize,
         command_list: &mut Vec<C::Command>,
+        nest_recipe_command_list: &mut Vec<ActionNestRecipeCommand>,
         env: &ActionEnvironmentTrackingState<C>,
     ) -> (ExecutionContextResult, Option<Self>) {
         let mut exec_ctx = ActionExecutionCtx::new(recipe_idx, recipe, recipe_items);
-        let result1 = exec_ctx.process_input_2(recipe_items, command_list, env);
+        let mut temporary_nest_recipe_command_list = Vec::new();
+        let result1 = exec_ctx.process_input_2(
+            recipe_items,
+            command_list,
+            &mut temporary_nest_recipe_command_list,
+            env,
+        );
         match result1 {
             | ExecutionContextResult::Done => {
                 panic!("You have a recipe that completes itself without any input!")
@@ -598,12 +713,22 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
             }
             | ExecutionContextResult::Used => {}
         }
-        let result2 = exec_ctx.process_input(input, recipe_items, recipe, command_list, env);
+        let result2 = exec_ctx.process_input(
+            input,
+            recipe_items,
+            recipe,
+            command_list,
+            &mut temporary_nest_recipe_command_list,
+            env,
+        );
         match result2 {
             | ExecutionContextResult::Done => (ExecutionContextResult::Done, None),
-            | ExecutionContextResult::Used => (ExecutionContextResult::Used, Some(exec_ctx)),
             | ExecutionContextResult::Ignore | ExecutionContextResult::Abort => {
                 (ExecutionContextResult::Ignore, None)
+            }
+            | ExecutionContextResult::Used => {
+                nest_recipe_command_list.extend(temporary_nest_recipe_command_list.into_iter());
+                (ExecutionContextResult::Used, Some(exec_ctx))
             }
         }
     }

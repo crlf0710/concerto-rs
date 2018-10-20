@@ -10,6 +10,9 @@ use ActionConfiguration;
 
 pub struct ActionRecipe<C: ActionConfiguration> {
     pub(crate) root_item: ActionRecipeItemIdx,
+    pub(crate) is_nested: bool,
+    pub(crate) is_enabled: bool,
+    pub(crate) nest_recipes: Vec<usize>,
     phantom: PhantomData<C>,
 }
 
@@ -45,12 +48,20 @@ impl<C: ActionConfiguration> Clone for ActionRecipeEffect<C> {
     }
 }
 
+pub(crate) enum ActionNestRecipeCommand {
+    Enable(usize, usize),
+    Disable(usize, usize),
+    Abort(usize, usize),
+}
+
 pub(crate) enum ActionRecipeItem<C: ActionConfiguration> {
     StartInput(ActionInput<C>),
     StartFilteredInput(Rc<Fn(&ActionInput<C>) -> ExecutionContextResult>),
     StartCondition(ActionCondition<C>),
     StartEffect(ActionRecipeEffect<C>),
     StartEffectOf(Box<Fn(ActionRecipeExecutionInfo<C>) -> (C::Command, C::Command)>),
+    StartNestRecipe(usize),
+    DisableNestRecipe(usize),
     EliminateItem(ActionRecipeItemIdx),
     DoCommand(ActionRecipeCommand<C>),
     DoCommandOf(Box<Fn(ActionRecipeExecutionInfo<C>) -> C::Command>),
@@ -81,7 +92,9 @@ impl<C: ActionConfiguration> ActionRecipeItem<C> {
             | ActionRecipeItem::DoCommand(_)
             | ActionRecipeItem::DoCommandOf(_)
             | ActionRecipeItem::StartEffect(_)
-            | ActionRecipeItem::StartEffectOf(_) => true,
+            | ActionRecipeItem::StartEffectOf(_)
+            | ActionRecipeItem::StartNestRecipe(_)
+            | ActionRecipeItem::DisableNestRecipe(_) => true,
             | _ => false,
         }
     }
@@ -125,6 +138,19 @@ impl<C: ActionConfiguration> Clone for ActionInput<C> {
     }
 }
 
+use std::fmt;
+
+impl<C: ActionConfiguration> fmt::Debug for ActionInput<C> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        match self {
+            ActionInput::CursorCoordinate(v) => write!(f, "CursorCoordinate({:?})", v),
+            ActionInput::FocusCoordinate(v) => write!(f, "FocusCoordinate({:?})", v),
+            ActionInput::KeyDown(v) => write!(f, "KeyDown({:?})", v),
+            ActionInput::KeyUp(v) => write!(f, "KeyUp({:?})", v),
+        }
+    }
+}
+
 pub enum ActionCondition<C: ActionConfiguration> {
     KeyPressed(C::KeyKind, bool),
 }
@@ -139,23 +165,33 @@ impl<C: ActionConfiguration> Clone for ActionCondition<C> {
 
 pub struct ActionRecipeBuilder<'a, C: ActionConfiguration> {
     sequence_builder: ActionRecipeSequenceBuilder<'a, C>,
-    phantom: PhantomData<C>,
+    nest_recipes: Vec<ActionRecipe<C>>,
 }
 
 impl<'a, C: ActionConfiguration> ActionRecipeBuilder<'a, C> {
     pub(crate) fn new(context_builder: &'a mut ActionContextBuilder<C>) -> Self {
         ActionRecipeBuilder {
             sequence_builder: ActionRecipeSequenceBuilder::new(context_builder),
-            phantom: PhantomData,
+            nest_recipes: Vec::new(),
         }
     }
     pub fn build(self) -> ActionRecipe<C> {
         let (context_builder, sequence) = self.sequence_builder.build();
         let item_idx = context_builder.recipe_items.register_item(sequence);
 
+        let mut nest_recipes = Vec::new();
+
+        for nest_recipe in self.nest_recipes {
+            let idx = context_builder.register_nested_recipe(nest_recipe);
+            nest_recipes.push(idx);
+        }
+
         ActionRecipe {
             root_item: item_idx,
             phantom: PhantomData,
+            is_enabled: true,
+            is_nested: false,
+            nest_recipes,
         }
     }
 }
@@ -176,13 +212,28 @@ impl<'a, C: ActionConfiguration> ActionRecipeBuilder<'a, C> {
         self
     }
 
+    pub fn add_cursor_coordinate_filtered_input<F>(mut self, filter: F) -> Self
+    where
+        F: Fn(&C::Target) -> bool + 'static,
+    {
+        let input_idx = self
+            .sequence_builder
+            .add_primitive_start_cursor_coordinate_filtered_input(filter);
+        self.sequence_builder
+            .add_primitive_eliminate_item(input_idx);
+        self
+    }
+
     pub fn keep_key_not_pressed(mut self, key: C::KeyKind) -> Self {
-        self.sequence_builder.add_primitive_start_key_condition(key, false);
+        self.sequence_builder
+            .add_primitive_start_key_condition(key, false);
         self
     }
 
     pub fn check_key_pressed(mut self, key: C::KeyKind) -> Self {
-        let input_idx = self.sequence_builder.add_primitive_start_key_condition(key, true);
+        let input_idx = self
+            .sequence_builder
+            .add_primitive_start_key_condition(key, true);
         self.sequence_builder
             .add_primitive_eliminate_item(input_idx);
         self
@@ -202,6 +253,28 @@ impl<'a, C: ActionConfiguration> ActionRecipeBuilder<'a, C> {
         self
     }
 
+    pub fn enable_starting_nest_recipe<F>(mut self, f: F) -> Self
+    where
+        F: for<'r> FnOnce(usize, ActionRecipeBuilder<'r, C>) -> ActionRecipe<C>,
+    {
+        let nest_recipe_idx = self.nest_recipes.len();
+        let nest_recipe = {
+            let nest_recipe_builder =
+                ActionRecipeBuilder::new(self.sequence_builder.context_builder);
+            (f)(nest_recipe_idx, nest_recipe_builder)
+        };
+        self.nest_recipes.push(nest_recipe);
+        self.sequence_builder
+            .add_primitive_start_nest_recipe(nest_recipe_idx);
+        self
+    }
+
+    pub fn disable_starting_nest_recipe(mut self, nest_recipe_idx: usize) -> Self {
+        self.sequence_builder
+            .add_primitive_disable_nest_recipe(nest_recipe_idx);
+        self
+    }
+
     pub fn issue_command(mut self, command: C::Command) -> Self {
         self.sequence_builder.add_primitive_issue_command(command);
         self
@@ -217,13 +290,14 @@ impl<'a, C: ActionConfiguration> ActionRecipeBuilder<'a, C> {
     }
 
     pub fn issue_effect(mut self, effect_start: C::Command, effect_end: C::Command) -> Self {
-        self.sequence_builder.add_primitive_issue_effect(effect_start, effect_end);
+        self.sequence_builder
+            .add_primitive_issue_effect(effect_start, effect_end);
         self
     }
 
     pub fn issue_effect_with<F>(mut self, effect_generator: F) -> Self
-        where
-            F: Fn(ActionRecipeExecutionInfo<C>) -> (C::Command, C::Command) + 'static,
+    where
+        F: Fn(ActionRecipeExecutionInfo<C>) -> (C::Command, C::Command) + 'static,
     {
         self.sequence_builder
             .add_primitive_issue_effect_with(effect_generator);
@@ -267,6 +341,30 @@ impl<'a, C: ActionConfiguration> ActionRecipeBuilder<'a, C> {
                 );
             },
         );
+
+        if let Some(items) = items {
+            self.sequence_builder.add_compound_sequence(
+                ActionRecipeSequenceKind::Sequential,
+                |builder| {
+                    items.into_iter().for_each(|item| {
+                        builder.add_primitive_eliminate_item(item);
+                    });
+                },
+            );
+        }
+        self
+    }
+
+    pub fn add_one_of_multiple_key_up_input(mut self, keys: &[C::KeyKind]) -> Self {
+        let mut items = None;
+        self.sequence_builder
+            .add_compound_sequence(ActionRecipeSequenceKind::Choice, |builder| {
+                items = Some(
+                    keys.iter()
+                        .map(|key| builder.add_primitive_start_key_up_input(key.clone()))
+                        .collect::<Vec<_>>(),
+                );
+            });
 
         if let Some(items) = items {
             self.sequence_builder.add_compound_sequence(
@@ -357,8 +455,26 @@ impl<'a, C: ActionConfiguration> ActionRecipeSequenceBuilder<'a, C> {
         item_idx
     }
 
-    fn add_primitive_start_key_condition(&mut self, key: C::KeyKind, pressed: bool) -> ActionRecipeItemIdx {
+    fn add_primitive_start_key_condition(
+        &mut self,
+        key: C::KeyKind,
+        pressed: bool,
+    ) -> ActionRecipeItemIdx {
         let input = ActionRecipeItem::StartCondition(ActionCondition::KeyPressed(key, pressed));
+        let item_idx = self.context_builder.recipe_items.register_item(input);
+        self.add_recipe_item(item_idx);
+        item_idx
+    }
+
+    fn add_primitive_start_nest_recipe(&mut self, nest_recipe: usize) -> ActionRecipeItemIdx {
+        let input = ActionRecipeItem::StartNestRecipe(nest_recipe);
+        let item_idx = self.context_builder.recipe_items.register_item(input);
+        self.add_recipe_item(item_idx);
+        item_idx
+    }
+
+    fn add_primitive_disable_nest_recipe(&mut self, nest_recipe: usize) -> ActionRecipeItemIdx {
+        let input = ActionRecipeItem::DisableNestRecipe(nest_recipe);
         let item_idx = self.context_builder.recipe_items.register_item(input);
         self.add_recipe_item(item_idx);
         item_idx
@@ -391,27 +507,26 @@ impl<'a, C: ActionConfiguration> ActionRecipeSequenceBuilder<'a, C> {
         item_idx
     }
 
-
-    pub fn add_primitive_issue_effect(&mut self, effect_start: C::Command, effect_end: C::Command) -> ActionRecipeItemIdx {
+    pub fn add_primitive_issue_effect(
+        &mut self,
+        effect_start: C::Command,
+        effect_end: C::Command,
+    ) -> ActionRecipeItemIdx {
         let command = ActionRecipeItem::StartEffect(ActionRecipeEffect(effect_start, effect_end));
         let item_idx = self.context_builder.recipe_items.register_item(command);
         self.add_recipe_item(item_idx);
         item_idx
     }
 
-    pub fn add_primitive_issue_effect_with<F>(
-        &mut self,
-        effect_generator: F,
-    ) -> ActionRecipeItemIdx
-        where
-            F: Fn(ActionRecipeExecutionInfo<C>) -> (C::Command, C::Command) + 'static,
+    pub fn add_primitive_issue_effect_with<F>(&mut self, effect_generator: F) -> ActionRecipeItemIdx
+    where
+        F: Fn(ActionRecipeExecutionInfo<C>) -> (C::Command, C::Command) + 'static,
     {
         let effect_of = ActionRecipeItem::StartEffectOf(Box::new(effect_generator) as _);
         let item_idx = self.context_builder.recipe_items.register_item(effect_of);
         self.add_recipe_item(item_idx);
         item_idx
     }
-
 
     pub fn add_compound_sequence<F>(
         &mut self,
