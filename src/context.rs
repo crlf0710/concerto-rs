@@ -86,6 +86,7 @@ impl<C: ActionConfiguration> ActionContext<C> {
         result
     }
 
+    #[allow(unused_assignments, unused_labels)]
     pub fn process_input(&mut self, input: &ActionInput<C>) -> bool {
         //use std::mem::drop;
         debug!(target: "concerto", "process_input {:?}.", input);

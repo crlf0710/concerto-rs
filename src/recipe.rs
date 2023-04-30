@@ -56,15 +56,15 @@ pub(crate) enum ActionNestRecipeCommand {
 
 pub(crate) enum ActionRecipeItem<C: ActionConfiguration> {
     StartInput(ActionInput<C>),
-    StartFilteredInput(Rc<Fn(&ActionInput<C>) -> ExecutionContextResult>),
+    StartFilteredInput(Rc<dyn Fn(&ActionInput<C>) -> ExecutionContextResult>),
     StartCondition(ActionCondition<C>),
     StartEffect(ActionRecipeEffect<C>),
-    StartEffectOf(Box<Fn(ActionRecipeExecutionInfo<C>) -> (C::Command, C::Command)>),
+    StartEffectOf(Box<dyn Fn(ActionRecipeExecutionInfo<C>) -> (C::Command, C::Command)>),
     StartNestRecipe(usize),
     DisableNestRecipe(usize),
     EliminateItem(ActionRecipeItemIdx),
     DoCommand(ActionRecipeCommand<C>),
-    DoCommandOf(Box<Fn(ActionRecipeExecutionInfo<C>) -> C::Command>),
+    DoCommandOf(Box<dyn Fn(ActionRecipeExecutionInfo<C>) -> C::Command>),
     Sequential(SmallVec<[ActionRecipeItemIdx; 3]>),
     Unordered(SmallVec<[ActionRecipeItemIdx; 3]>),
     Choice(SmallVec<[ActionRecipeItemIdx; 3]>),
@@ -73,47 +73,47 @@ pub(crate) enum ActionRecipeItem<C: ActionConfiguration> {
 impl<C: ActionConfiguration> ActionRecipeItem<C> {
     pub(crate) fn is_interactive(&self) -> bool {
         match self {
-            | ActionRecipeItem::StartInput(_) => true,
-            | ActionRecipeItem::StartFilteredInput(_) => true,
-            | _ => false,
+            ActionRecipeItem::StartInput(_) => true,
+            ActionRecipeItem::StartFilteredInput(_) => true,
+            _ => false,
         }
     }
 
     pub(crate) fn is_condition(&self) -> bool {
         match self {
-            | ActionRecipeItem::StartCondition(_) => true,
-            | _ => false,
+            ActionRecipeItem::StartCondition(_) => true,
+            _ => false,
         }
     }
 
     pub(crate) fn is_noninteractive(&self) -> bool {
         match self {
-            | ActionRecipeItem::EliminateItem(_)
+            ActionRecipeItem::EliminateItem(_)
             | ActionRecipeItem::DoCommand(_)
             | ActionRecipeItem::DoCommandOf(_)
             | ActionRecipeItem::StartEffect(_)
             | ActionRecipeItem::StartEffectOf(_)
             | ActionRecipeItem::StartNestRecipe(_)
             | ActionRecipeItem::DisableNestRecipe(_) => true,
-            | _ => false,
+            _ => false,
         }
     }
 
     pub(crate) fn is_compound(&self) -> bool {
         match self {
-            | ActionRecipeItem::Sequential(_)
+            ActionRecipeItem::Sequential(_)
             | ActionRecipeItem::Unordered(_)
             | ActionRecipeItem::Choice(_) => true,
-            | _ => false,
+            _ => false,
         }
     }
 
     pub(crate) fn compound_sequence(&self) -> &[ActionRecipeItemIdx] {
         match self {
-            | ActionRecipeItem::Sequential(seq) => &seq,
-            | ActionRecipeItem::Unordered(seq) => &seq,
-            | ActionRecipeItem::Choice(seq) => &seq,
-            | _ => unreachable!(),
+            ActionRecipeItem::Sequential(seq) => &seq,
+            ActionRecipeItem::Unordered(seq) => &seq,
+            ActionRecipeItem::Choice(seq) => &seq,
+            _ => unreachable!(),
         }
     }
 }

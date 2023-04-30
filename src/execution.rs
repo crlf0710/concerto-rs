@@ -134,7 +134,7 @@ impl<C: ActionConfiguration> ActionExecutionContractStore<C> {
         let mut contracts = BTreeMap::new();
         swap(&mut self.contracts, &mut contracts);
         let mut new_command = false;
-        for (k, contract) in contracts {
+        for (_k, contract) in contracts {
             if self.internal_eliminate_contract(
                 recipe_id,
                 contract,
@@ -157,7 +157,7 @@ impl<'a, C: ActionConfiguration> ActionRecipeExecutionInfo<'a, C> {
         ActionRecipeExecutionInfo { stored_contracts }
     }
     pub fn cursor_coordinate(&self) -> Option<&C::Target> {
-        for (idx, contract) in self.stored_contracts.contracts.iter() {
+        for (_idx, contract) in self.stored_contracts.contracts.iter() {
             match contract {
                 ActionExecutionContract::Input(expected_input) => match expected_input {
                     ActionInput::CursorCoordinate(target) => return Some(target),
@@ -189,6 +189,8 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
             ));
         ctx
     }
+
+    #[allow(dead_code)]
     pub(crate) fn get_recipe<'a>(&self, recipes: &'a [ActionRecipe<C>]) -> &'a ActionRecipe<C> {
         &recipes[self.recipe_idx]
     }
@@ -197,7 +199,7 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
         input: &ActionInput<C>,
         stored_contracts: &ActionExecutionContractStore<C>,
     ) -> bool {
-        for (idx, contract) in stored_contracts.contracts.iter() {
+        for (_idx, contract) in stored_contracts.contracts.iter() {
             match contract {
                 ActionExecutionContract::Input(expected_input) => {
                     match Self::check_input_match_input(expected_input, input) {
@@ -248,7 +250,7 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
                     ExecutionContextResult::Abort
                 }
             }
-            (ActionInput::CursorCoordinate(v1), _) => ExecutionContextResult::Ignore,
+            (ActionInput::CursorCoordinate(_v1), _) => ExecutionContextResult::Ignore,
             (ActionInput::FocusCoordinate(v1), ActionInput::FocusCoordinate(v2)) => {
                 if v1 == v2 {
                     ExecutionContextResult::Used
@@ -256,7 +258,7 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
                     ExecutionContextResult::Abort
                 }
             }
-            (ActionInput::FocusCoordinate(v1), _) => ExecutionContextResult::Ignore,
+            (ActionInput::FocusCoordinate(_v1), _) => ExecutionContextResult::Ignore,
             (ActionInput::KeyDown(v1), ActionInput::KeyDown(v2)) => {
                 if v1 == v2 {
                     ExecutionContextResult::Used
@@ -439,7 +441,7 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
         &mut self,
         input: &ActionInput<C>,
         recipe_items: &ActionRecipeItemStore<C>,
-        recipe: &ActionRecipe<C>,
+        _recipe: &ActionRecipe<C>,
     ) -> ExecutionContextResult {
         if Self::stored_contracts_conflict(input, &mut self.stored_contracts) {
             return ExecutionContextResult::Abort;
@@ -546,7 +548,6 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
                     return ExecutionContextResult::Ignore;
                 }
             }
-            _ => unreachable!(),
         }
     }
 
@@ -557,7 +558,7 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
         nest_recipe_command_list: &mut Vec<ActionNestRecipeCommand>,
         env: &ActionEnvironmentTrackingState<C>,
     ) -> ExecutionContextResult {
-        'frame_loop: while !self.backtrace.is_empty() {
+        '_frame_loop: while !self.backtrace.is_empty() {
             let last_frame_depth = self.backtrace.len() - 1;
             let mut new_frame = None;
             {
@@ -621,12 +622,10 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
 
                         if let Some(first_unused) = state_set.ones().next() {
                             debug!(target: "concerto", "process_input_2: recipe_id = {}, seq = {:?}, unordered, first unmatch({}) stopped here", self.recipe_idx, last_frame.0, first_unused);
-                            debug_assert!(
-                                state_set
-                                    .ones()
-                                    .map(|seq_idx| recipe_items.get(seq_items[seq_idx]))
-                                    .all(|x| x.is_interactive())
-                            );
+                            debug_assert!(state_set
+                                .ones()
+                                .map(|seq_idx| recipe_items.get(seq_items[seq_idx]))
+                                .all(|x| x.is_interactive()));
                             return ExecutionContextResult::Used;
                         } else {
                             debug!(target: "concerto", "process_input_2: recipe_id = {}, seq = {:?}, unordered, finished", self.recipe_idx, last_frame.0);
@@ -634,15 +633,12 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
                     }
                     ActionExecutionFrame::Choice(state_choice) => {
                         if state_choice.is_none() {
-                            debug_assert!(
-                                (0..(seq_items.len()))
-                                    .map(|seq_idx| recipe_items.get(seq_items[seq_idx]))
-                                    .all(|x| x.is_interactive())
-                            );
+                            debug_assert!((0..(seq_items.len()))
+                                .map(|seq_idx| recipe_items.get(seq_items[seq_idx]))
+                                .all(|x| x.is_interactive()));
                             return ExecutionContextResult::Used;
                         }
                     }
-                    _ => unreachable!(),
                 }
             }
             if let Some(new_frame) = new_frame {
@@ -705,13 +701,13 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
             env,
         );
         match result1 {
-            | ExecutionContextResult::Done => {
+            ExecutionContextResult::Done => {
                 panic!("You have a recipe that completes itself without any input!")
             }
-            | ExecutionContextResult::Ignore | ExecutionContextResult::Abort => {
+            ExecutionContextResult::Ignore | ExecutionContextResult::Abort => {
                 return (ExecutionContextResult::Ignore, None);
             }
-            | ExecutionContextResult::Used => {}
+            ExecutionContextResult::Used => {}
         }
         let result2 = exec_ctx.process_input(
             input,
@@ -722,11 +718,11 @@ impl<C: ActionConfiguration> ActionExecutionCtx<C> {
             env,
         );
         match result2 {
-            | ExecutionContextResult::Done => (ExecutionContextResult::Done, None),
-            | ExecutionContextResult::Ignore | ExecutionContextResult::Abort => {
+            ExecutionContextResult::Done => (ExecutionContextResult::Done, None),
+            ExecutionContextResult::Ignore | ExecutionContextResult::Abort => {
                 (ExecutionContextResult::Ignore, None)
             }
-            | ExecutionContextResult::Used => {
+            ExecutionContextResult::Used => {
                 nest_recipe_command_list.extend(temporary_nest_recipe_command_list.into_iter());
                 (ExecutionContextResult::Used, Some(exec_ctx))
             }
